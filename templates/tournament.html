@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% from "_macros.html" import result_controls, status_pill with context %}
+{% block title %}{{ t.name }} · Tournament Manager{% endblock %}
+{% block content %}
+{% set here = url_for('tournament', tid=t.id, tab=tab, round=view_round if tab == 'pairings' else none) %}
+
+<section class="t-head card">
+  <div class="t-head-main">
+    <div>
+      <span class="status status-{{ t.status }}">{% if t.status == 'swiss' %}Swiss · Round {{ t.current_round }} of {{ t.swiss_rounds }}{% elif t.status == 'topcut' %}Top Cut · {{ engine.topcut_round_name(t.topcut_size // (2 ** (t.current_round - 1))) }}{% else %}{{ t.status|capitalize }}{% endif %}</span>
+      <h1>{{ t.name }}</h1>
+      <div class="muted">{{ t.game or 'Tournament' }}{% if t.event_date %} · {{ t.event_date }}{% endif %}{% if t.location %} · {{ t.location }}{% endif %}</div>
+    </div>
+    <div class="chips">
+      <span class="chip">Swiss {{ t.swiss_format|upper }}</span>
+      <span class="chip">{% if t.swiss_rounds %}{{ t.swiss_rounds }} rounds{% else %}Auto rounds ({{ recommended_rounds }} for {{ entries|length }} players){% endif %}</span>
+      {% if t.topcut_size %}<span class="chip chip-cut">Top {{ t.topcut_size }} · BO3</span>{% else %}<span class="chip">No Top Cut</span>{% endif %}
+      <span class="chip">{{ entries|length }}{% if t.max_players %}/{{ t.max_players }}{% endif %} players</span>
+    </div>
+  </div>
+
+  {% if me.is_admin %}
+  <div class="admin-bar">
+    <span class="admin-label">Coordinator</span>
+    {% if t.status == 'registration' %}
+      <form method="post" action="{{ url_for('start', tid=t.id) }}" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn btn-primary" {% if entries|length < 2 %}disabled{% endif %}>Start tournament · pair Round 1</button>
+      </form>
+      <a class="btn" href="{{ url_for('tournament_edit', tid=t.id) }}">Settings</a>
+    {% elif t.status in ('swiss', 'topcut') %}
+      {% if outstanding %}<span class="muted">{{ outstanding }} match{{ 'es' if outstanding != 1 }} still playing</span>{% else %}<span class="ok-text">All results in ✓</span>{% endif %}
+      <form method="post" action="{{ url_for('advance', tid=t.id) }}" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn btn-primary" {% if outstanding %}disabled{% endif %}>
+          {% if t.status == 'swiss' and t.current_round < t.swiss_rounds %}Pair Round {{ t.current_round + 1 }}
+          {% elif t.status == 'swiss' and t.topcut_size %}End Swiss · build Top {{ t.topcut_size }}
+          {% elif t.status == 'swiss' %}Finish tournament
+          {% elif t.topcut_size // (2 ** (t.current_round - 1)) == 2 %}Crown champion
+          {% else %}Next bracket round{% endif %}
+        </button>
+      </form>
+      {% if t.status == 'swiss' %}
+      <form method="post" action="{{ url_for('repair', tid=t.id) }}" class="inline" onsubmit="return confirm('Re-pair Round {{ t.current_round }}? Only possible before any result is entered.')">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn">Re-pair round</button>
+      </form>
+      {% endif %}
+    {% endif %}
+    <form method="post" action="{{ url_for('tournament_delete', tid=t.id) }}" class="inline push-right" onsubmit="return confirm('Delete this tournament and all its results?')">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-danger-ghost">Delete</button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+
+{% if t.status == 'finished' and t.champion_id %}
+<section class="champion card">
+  <div class="trophy">🏆</div>
+  <div><div class="muted small">Champion</div><div class="champ-name">{{ names.get(t.champion_id, '—') }}</div></div>
+</section>
+{% endif %}
+
+{# ---------- player panel ---------- #}
+{% if not me.is_admin or my_entry %}
+<section class="card my-panel">
+  {% if t.status == 'registration' %}
+    {% if my_entry %}
+      <div class="my-row"><div><strong>You're registered.</strong> <span class="muted">Pairings appear here when the Coordinator starts Round 1.</span></div>
+      <form method="post" action="{{ url_for('leave', tid=t.id) }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-sm">Leave</button></form></div>
+    {% else %}
+      <div class="my-row"><div><strong>Registration is open.</strong></div>
+      <form method="post" action="{{ url_for('join', tid=t.id) }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-primary">Join tournament</button></form></div>
+    {% endif %}
+  {% elif my_entry and my_entry.dropped %}
+    <div class="muted">You have dropped from this tournament.</div>
+  {% elif my_match %}
+    {% set opp = my_match.p2_id if my_match.p1_id == me.id else my_match.p1_id %}
+    <div class="my-match">
+      <div class="my-match-label">Your {{ 'match' if t.status == 'swiss' else 'bracket match' }} · {% if t.status == 'swiss' %}Round {{ t.current_round }}{% else %}{{ engine.topcut_round_name(t.topcut_size // (2 ** (t.current_round - 1))) }}{% endif %} · Best of {{ 3 if (t.status == 'topcut' or t.swiss_format == 'bo3') else 1 }}</div>
+      {% if opp is none %}
+        <div class="vs"><strong>You have a BYE this round</strong> <span class="muted">(counts as a win)</span></div>
+      {% else %}
+        <div class="vs">
+          {% if my_match.table_no and t.status == 'swiss' %}<span class="table-no">Table {{ my_match.table_no }}</span>{% endif %}
+          <strong>{{ names[my_match.p1_id] }}</strong> <span class="vs-x">vs</span> <strong>{{ names[my_match.p2_id] }}</strong>
+          <span class="score">{{ format_score(my_match, t) }}</span> {{ status_pill(my_match, names) }}
+        </div>
+        {% if my_match.status == 'reported' and my_match.reported_by == me.id %}<p class="muted small">Waiting for {{ names[opp] }} to confirm. You can still change it.</p>{% endif %}
+        {% if my_match.status == 'reported' and my_match.reported_by != me.id %}<p class="small"><strong>{{ names.get(my_match.reported_by, 'Your opponent') }}</strong> reported this result. Is it correct?</p>{% endif %}
+        {{ result_controls(t, my_match, names, here) }}
+      {% endif %}
+    </div>
+    {% if t.status == 'swiss' %}
+    <form method="post" action="{{ url_for('drop', tid=t.id) }}" class="drop-form" onsubmit="return confirm('Drop from the tournament? You will not be paired in later rounds.')">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button class="linklike danger">Drop from tournament</button>
+    </form>
+    {% endif %}
+  {% elif my_entry and t.status == 'topcut' %}
+    <div class="muted">You didn't make this round of the Top Cut. Thanks for playing!</div>
+  {% elif my_entry and t.status == 'finished' %}
+    <div class="muted">Tournament complete. Thanks for playing!</div>
+  {% elif not my_entry %}
+    <div class="muted">You're spectating this tournament.</div>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ---------- tabs ---------- #}
+<nav class="tabs">
+  <a href="{{ url_for('tournament', tid=t.id, tab='players') }}" class="{{ 'active' if tab == 'players' }}">Players <span class="count">{{ entries|length }}</span></a>
+  {% if t.status != 'registration' %}
+  <a href="{{ url_for('tournament', tid=t.id, tab='pairings') }}" class="{{ 'active' if tab == 'pairings' }}">Pairings</a>
+  <a href="{{ url_for('tournament', tid=t.id, tab='standings') }}" class="{{ 'active' if tab == 'standings' }}">Standings</a>
+  {% endif %}
+  {% if t.topcut_size %}<a href="{{ url_for('tournament', tid=t.id, tab='bracket') }}" class="{{ 'active' if tab == 'bracket' }}">Top {{ t.topcut_size }} bracket</a>{% endif %}
+  <a href="{{ here }}" class="refresh" title="Refresh">↻ Refresh</a>
+</nav>
+
+{% if tab == 'players' %}
+<section class="card">
+  {% if me.is_admin and t.status == 'registration' and all_users %}
+  <form method="post" action="{{ url_for('player_add', tid=t.id) }}" class="add-players">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Add players
+      <select name="user_id" multiple size="{{ [all_users|length, 6]|min }}">
+        {% for u in all_users %}<option value="{{ u.id }}">{{ u.display_name }} (@{{ u.username }})</option>{% endfor %}
+      </select>
+      <span class="hint">Hold Ctrl to pick several. New walk-in? Create their account on the <a href="{{ url_for('users') }}">Users</a> page.</span>
+    </label>
+    <button class="btn btn-primary">Add selected</button>
+  </form>
+  {% endif %}
+  {% if not entries %}
+    <p class="muted empty">No players yet.</p>
+  {% else %}
+  <table class="table">
+    <thead><tr><th>#</th><th>Player</th><th>Status</th>{% if me.is_admin %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for e in entries %}
+      <tr class="{{ 'dropped' if e.dropped }}">
+        <td class="muted">{{ loop.index }}</td>
+        <td><strong>{{ e.display_name }}</strong> <span class="muted small">@{{ e.username }}</span>{% if e.seed %} <span class="tag">Seed {{ e.seed }}</span>{% endif %}</td>
+        <td>{% if e.dropped %}<span class="tag tag-drop">Dropped R{{ e.dropped_round }}</span>{% else %}<span class="tag tag-ok">Active</span>{% endif %}</td>
+        {% if me.is_admin %}
+        <td class="actions">
+          {% if t.status == 'registration' %}
+            <form method="post" action="{{ url_for('player_remove', tid=t.id, uid=e.user_id) }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-sm btn-danger-ghost">Remove</button></form>
+          {% elif t.status in ('swiss', 'topcut') %}
+            <form method="post" action="{{ url_for('drop', tid=t.id) }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="user_id" value="{{ e.user_id }}"><button class="btn btn-sm">{{ 'Reinstate' if e.dropped else 'Drop' }}</button></form>
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% elif tab == 'pairings' %}
+<section class="card">
+  <div class="round-pick">
+    {% for r in range(1, swiss_rounds_played + 1) %}
+      <a href="{{ url_for('tournament', tid=t.id, tab='pairings', round=r) }}" class="round-btn {{ 'active' if r == view_round }}">R{{ r }}</a>
+    {% endfor %}
+    <span class="muted small">Swiss · {{ 'Best of 3' if t.swiss_format == 'bo3' else 'Best of 1' }}</span>
+  </div>
+  {% if not pairings %}<p class="muted empty">No pairings yet.</p>{% else %}
+  <div class="pairings">
+    {% for m in pairings %}
+    {% set mine = me.id in (m.p1_id, m.p2_id) %}
+    <div class="pairing {{ 'mine' if mine }}">
+      <div class="p-table">{{ m.table_no or '—' }}</div>
+      <div class="p-players">
+        <div class="p-line {% if m.status != 'pending' and m.p1_wins > m.p2_wins %}winner{% endif %}">{{ names[m.p1_id] }}</div>
+        <div class="p-line {% if m.status != 'pending' and m.p2_id and m.p2_wins > m.p1_wins %}winner{% endif %}">{{ names[m.p2_id] if m.p2_id else 'BYE' }}</div>
+      </div>
+      <div class="p-score">{{ format_score(m, t) }}</div>
+      <div class="p-state">{{ status_pill(m, names) }}{% if m.p2_id and (me.is_admin or mine) %}{{ result_controls(t, m, names, here) }}{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+{% elif tab == 'standings' %}
+<section class="card">
+  <h2>Swiss standings {% if t.status == 'swiss' %}<span class="muted small">after confirmed &amp; reported results</span>{% endif %}</h2>
+  <div class="table-scroll">
+  <table class="table standings">
+    <thead><tr><th>Rank</th><th>Player</th><th>Pts</th><th>W-L-D</th><th title="Opponents' match win %">OMW%</th><th title="Game win %">GW%</th><th title="Opponents' game win %">OGW%</th></tr></thead>
+    <tbody>
+    {% for r in standings %}
+      <tr class="{{ 'me-row' if r.player == me.id }} {{ 'dropped' if r.dropped }} {{ 'cut-line' if t.topcut_size and r.rank == t.topcut_size }}">
+        <td class="rank">{{ r.rank }}</td>
+        <td><strong>{{ r.name }}</strong>{% if r.dropped %} <span class="tag tag-drop">Dropped</span>{% endif %}{% if r.byes %} <span class="muted small">({{ r.byes }} bye)</span>{% endif %}</td>
+        <td><strong>{{ r.points }}</strong></td>
+        <td>{{ r.record }}</td>
+        <td>{{ r.omw|pct }}</td><td>{{ r.gw|pct }}</td><td>{{ r.ogw|pct }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">Win = 3 pts, Draw = 1 pt. Ties broken by OMW%, then GW%, then OGW% (33% minimum per opponent). Byes count as a win but are ignored for opponents' percentages.{% if t.topcut_size %} The line marks the Top {{ t.topcut_size }} cut.{% endif %}</p>
+</section>
+
+{% elif tab == 'bracket' %}
+<section class="card">
+  <h2>Top {{ t.topcut_size }} · Single elimination · Best of 3</h2>
+  {% if t.status in ('registration', 'swiss') %}<p class="muted">The bracket fills in after Swiss ends. Seeds come from final Swiss standings.</p>{% endif %}
+  <div class="bracket">
+    {% for col in bracket %}
+    <div class="b-col">
+      <div class="b-title">{{ col.name }}</div>
+      <div class="b-matches">
+      {% for m in col.matches %}
+        {% if m is none %}
+          <div class="b-match placeholder"><div class="b-p">TBD</div><div class="b-p">TBD</div></div>
+        {% else %}
+          {% set done = m.status != 'pending' %}
+          <div class="b-match {{ 'mine' if me.id in (m.p1_id, m.p2_id) }}">
+            <div class="b-p {{ 'winner' if done and m.p1_wins > m.p2_wins }}"><span class="seed">{{ seeds.get(m.p1_id, '') }}</span>{{ names[m.p1_id] }}<span class="b-s">{{ m.p1_wins if done }}</span></div>
+            <div class="b-p {{ 'winner' if done and m.p2_wins > m.p1_wins }}"><span class="seed">{{ seeds.get(m.p2_id, '') }}</span>{{ names[m.p2_id] }}<span class="b-s">{{ m.p2_wins if done }}</span></div>
+            {% if t.status == 'topcut' and t.current_round == m.round %}
+              <div class="b-ctrl">{{ status_pill(m, names) }}{% if me.is_admin or me.id in (m.p1_id, m.p2_id) %}{{ result_controls(t, m, names, here) }}{% endif %}</div>
+            {% endif %}
+          </div>
+        {% endif %}
+      {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

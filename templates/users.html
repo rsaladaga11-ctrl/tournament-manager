@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Users · Tournament Manager{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Users</h1></div>
+<div class="grid-2">
+  <section class="card">
+    <h2>Create account</h2>
+    <p class="muted">For walk-in players who don't have an account yet.</p>
+    <form method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="action" value="create">
+      <label>Username <input name="username" required minlength="3"></label>
+      <label>Display name <input name="display_name"></label>
+      <label>Password <input name="password" required minlength="4"></label>
+      <label class="check"><input type="checkbox" name="is_admin"> Admin / Tournament Coordinator</label>
+      <button class="btn btn-primary">Create</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>All accounts <span class="count">{{ users|length }}</span></h2>
+    <table class="table">
+      <thead><tr><th>Name</th><th>Role</th><th></th></tr></thead>
+      <tbody>
+      {% for u in users %}
+        <tr>
+          <td><strong>{{ u.display_name }}</strong><div class="muted small">@{{ u.username }}</div></td>
+          <td>{% if u.is_admin %}<span class="tag tag-admin">Admin</span>{% else %}<span class="tag">Player</span>{% endif %}</td>
+          <td class="actions">
+            <form method="post" class="inline">
+              <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="user_id" value="{{ u.id }}">
+              <button class="btn btn-sm" name="action" value="toggle_admin">{{ 'Make player' if u.is_admin else 'Make admin' }}</button>
+            </form>
+            <details class="inline-details">
+              <summary class="btn btn-sm">Reset password</summary>
+              <form method="post" class="row-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="user_id" value="{{ u.id }}">
+                <input name="password" placeholder="New password" minlength="4" required>
+                <button class="btn btn-sm btn-primary" name="action" value="reset_password">Set</button>
+              </form>
+            </details>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</div>
+{% endblock %}

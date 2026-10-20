@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><h1>{{ 'Tournament settings' if editing else 'New tournament' }}</h1></div>
+<form method="post" class="card form-card">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <section>
+    <h2>Event details</h2>
+    <label>Tournament name <input name="name" value="{{ t.name }}" required placeholder="e.g. Friday Night Showdown"></label>
+    <div class="grid-3">
+      <label>Game <input name="game" value="{{ t.game or '' }}" placeholder="e.g. Pokémon TCG"></label>
+      <label>Date <input type="date" name="event_date" value="{{ t.event_date or '' }}"></label>
+      <label>Location <input name="location" value="{{ t.location or '' }}"></label>
+    </div>
+  </section>
+
+  <section>
+    <h2>Swiss rounds</h2>
+    <div class="choice-grid">
+      <label class="choice">
+        <input type="radio" name="swiss_format" value="bo1" {% if t.swiss_format == 'bo1' %}checked{% endif %}>
+        <span><strong>Swiss · Best of 1</strong><em>One game per match. Win 3 pts, draw 1.</em></span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="swiss_format" value="bo3" {% if t.swiss_format == 'bo3' %}checked{% endif %}>
+        <span><strong>Swiss · Best of 3</strong><em>First to 2 game wins. Win 3 pts, draw 1.</em></span>
+      </label>
+    </div>
+    <div class="grid-2">
+      <label>Number of Swiss rounds
+        <input type="number" name="swiss_rounds" min="0" max="20" value="{{ t.swiss_rounds or '' }}" placeholder="Automatic">
+        <span class="hint">Leave blank for automatic at start: 4–8 players → 3, 9–16 → 4, 17–32 → 5, 33–64 → 6.</span>
+      </label>
+      <label>Player cap
+        <input type="number" name="max_players" min="0" value="{{ t.max_players or '' }}" placeholder="Unlimited">
+      </label>
+    </div>
+  </section>
+
+  <section>
+    <h2>Top Cut <span class="tag">Always Best of 3</span></h2>
+    <p class="muted">After Swiss, the top players by standings play a single-elimination bracket (1 vs 8, 4 vs 5, 2 vs 7, 3 vs 6…).</p>
+    <div class="choice-grid choice-grid-6">
+      {% for size in engine.TOPCUT_SIZES %}
+      <label class="choice choice-sm">
+        <input type="radio" name="topcut_size" value="{{ size }}" {% if t.topcut_size == size %}checked{% endif %}>
+        <span><strong>{{ 'No cut' if size == 0 else ('Top ' ~ size) }}</strong><em>{{ 'Swiss only' if size == 0 else ('Finals only' if size == 2 else (size ~ ' players')) }}</em></span>
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <div class="form-actions">
+    <a class="btn" href="{{ url_for('tournament', tid=t.id) if editing else url_for('index') }}">Cancel</a>
+    <button class="btn btn-primary">{{ 'Save settings' if editing else 'Create tournament' }}</button>
+  </div>
+</form>
+{% endblock %}
