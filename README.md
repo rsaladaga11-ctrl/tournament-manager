@@ -2,7 +2,27 @@
 
 A web app where a Tournament Coordinator / Admin creates tournaments and players log in, join, see pairings and report their own results.
 
-## Start it (Windows)
+## Put it online (Render + Neon, both free)
+
+Render hosts the app. Neon holds the database: Render's own free database is deleted after 30 days, Neon's isn't.
+
+**1. Create the database (Neon)**
+1. Sign up at https://neon.tech (you can sign in with GitHub) and create a project, e.g. `tournament`.
+2. On the project dashboard click **Connect** and copy the connection string. It looks like
+   `postgresql://user:password@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require`
+
+**2. Deploy the app (Render)**
+1. Sign up at https://render.com with your GitHub account.
+2. Click **New** → **Blueprint**, and pick the `tournament-manager` repository (give Render access to it if asked).
+3. When it asks for `DATABASE_URL`, paste the Neon connection string. Click **Deploy Blueprint**.
+4. After a few minutes your app is live at an address like `https://tournament-manager-xxxx.onrender.com`.
+5. Open it and **create your account first: the first account becomes the Admin.**
+
+Every push to GitHub redeploys the app automatically. Your data stays in Neon.
+
+Good to know about the free plan: the app goes to sleep after 15 minutes with no visitors, and the first visit after that takes about a minute to load. Open the site a few minutes before an event starts.
+
+## Run it on your own PC (Windows)
 
 1. Install Python 3.10+ from python.org (tick "Add Python to PATH").
 2. Double-click `run.bat`. The first run installs Flask automatically.
@@ -41,4 +61,5 @@ Win = 3 pts, Draw = 1 pt. Ties are broken by **OMW%**, then **GW%**, then **OGW%
 - `app.py`: web app (routes, database)
 - `engine.py`: pairing, standings and bracket logic
 - `templates/`, `static/`: pages and styling
-- `instance/tournament.db`: all data (SQLite). Back up this file to keep your history.
+- `render.yaml`: Render deployment settings
+- On your PC, data is saved in `instance/tournament.db` (SQLite). Online, it's saved in the Postgres database set by `DATABASE_URL`.

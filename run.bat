@@ -6,6 +6,6 @@ if not exist venv (
   python -m venv venv
 )
 call venv\Scripts\activate
-pip install -q -r requirements.txt
+pip install -q Flask
 python app.py
 pause

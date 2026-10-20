@@ -5,7 +5,8 @@ Admins / Tournament Coordinators create tournaments (Swiss Bo1 or Bo3, optional
 Bo3 single-elimination Top Cut). Players log in, join, see pairings and report
 their own match results.
 
-Run:  python app.py   then open http://localhost:5000
+Run locally:  python app.py   then open http://localhost:5000  (uses SQLite)
+Online (Render): set DATABASE_URL to a Postgres connection string and SECRET_KEY.
 The first account registered becomes the Admin.
 """
 import os
@@ -25,11 +26,19 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
 DB_PATH = os.environ.get("TOURNAMENT_DB", os.path.join(INSTANCE_DIR, "tournament.db"))
 
+# Postgres when DATABASE_URL is set (e.g. on Render), otherwise a local SQLite file.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+USE_PG = DATABASE_URL.startswith("postgresql://")
+
 app = Flask(__name__)
 os.makedirs(INSTANCE_DIR, exist_ok=True)
 
 
 def _secret_key():
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
     path = os.path.join(INSTANCE_DIR, "secret.key")
     if not os.path.exists(path):
         with open(path, "w") as f:
@@ -39,6 +48,8 @@ def _secret_key():
 
 
 app.config["SECRET_KEY"] = _secret_key()
+if os.environ.get("RENDER"):  # served over HTTPS on Render
+    app.config["SESSION_COOKIE_SECURE"] = True
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -91,14 +102,95 @@ CREATE TABLE IF NOT EXISTS matches (
 );
 """
 
+SCHEMA_PG = """
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci ON users (LOWER(username));
+CREATE TABLE IF NOT EXISTS tournaments (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    game TEXT,
+    event_date TEXT,
+    location TEXT,
+    swiss_format TEXT NOT NULL CHECK (swiss_format IN ('bo1','bo3')),
+    swiss_rounds INTEGER NOT NULL DEFAULT 0,
+    topcut_size INTEGER NOT NULL DEFAULT 0,
+    max_players INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'registration',
+    current_round INTEGER NOT NULL DEFAULT 0,
+    champion_id INTEGER,
+    created_by INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entries (
+    id SERIAL PRIMARY KEY,
+    tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    dropped INTEGER NOT NULL DEFAULT 0,
+    dropped_round INTEGER,
+    seed INTEGER,
+    UNIQUE (tournament_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS matches (
+    id SERIAL PRIMARY KEY,
+    tournament_id INTEGER NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    table_no INTEGER,
+    p1_id INTEGER NOT NULL,
+    p2_id INTEGER,
+    p1_wins INTEGER NOT NULL DEFAULT 0,
+    p2_wins INTEGER NOT NULL DEFAULT 0,
+    draws INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reported_by INTEGER,
+    updated_at TEXT
+);
+"""
+
 
 # ---------------------------------------------------------------- db helpers
 
+class Database:
+    """Thin wrapper so the same SQL ("?" placeholders) runs on SQLite and Postgres."""
+
+    def __init__(self):
+        if USE_PG:
+            import psycopg
+            from psycopg.rows import dict_row
+            self.conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        else:
+            self.conn = sqlite3.connect(DB_PATH)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def execute(self, sql, args=()):
+        if USE_PG:
+            sql = sql.replace("?", "%s")
+        return self.conn.execute(sql, args)
+
+    def insert(self, sql, args=()):
+        """Run an INSERT and return the new row id."""
+        if USE_PG:
+            return self.execute(sql + " RETURNING id", args).fetchone()["id"]
+        return self.execute(sql, args).lastrowid
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = Database()
     return g.db
 
 
@@ -110,6 +202,11 @@ def _close_db(exc):
 
 
 def init_db():
+    if USE_PG:
+        import psycopg
+        with psycopg.connect(DATABASE_URL) as conn:
+            conn.execute(SCHEMA_PG)
+        return
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     conn.commit()
@@ -190,7 +287,7 @@ def get_tournament(tid):
 def entries_for(tid):
     return q("""SELECT e.*, u.display_name, u.username FROM entries e
                 JOIN users u ON u.id = e.user_id
-                WHERE e.tournament_id = ? ORDER BY u.display_name COLLATE NOCASE""", (tid,))
+                WHERE e.tournament_id = ? ORDER BY LOWER(u.display_name)""", (tid,))
 
 
 def match_dict(m):
@@ -299,15 +396,15 @@ def register():
         pw = request.form.get("password", "")
         if len(username) < 3 or len(pw) < 4:
             flash("Username must be at least 3 characters and password at least 4.", "error")
-        elif q("SELECT 1 FROM users WHERE username = ?", (username,), one=True):
+        elif q("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,), one=True):
             flash("That username is taken.", "error")
         else:
             first = q("SELECT COUNT(*) c FROM users", one=True)["c"] == 0
-            cur = db().execute("INSERT INTO users (username, display_name, password_hash, is_admin, created_at) "
-                               "VALUES (?, ?, ?, ?, ?)",
-                               (username, name, generate_password_hash(pw), 1 if first else 0, now()))
+            new_id = db().insert("INSERT INTO users (username, display_name, password_hash, is_admin, created_at) "
+                                 "VALUES (?, ?, ?, ?, ?)",
+                                 (username, name, generate_password_hash(pw), 1 if first else 0, now()))
             db().commit()
-            session["uid"] = cur.lastrowid
+            session["uid"] = new_id
             flash("Account created. You are the Admin (first account)." if first else "Welcome!", "ok")
             return redirect(url_for("index"))
     return render_template("register.html")
@@ -316,7 +413,7 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = q("SELECT * FROM users WHERE username = ?", (request.form.get("username", "").strip(),), one=True)
+        u = q("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (request.form.get("username", "").strip(),), one=True)
         if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
             session["uid"] = u["id"]
             nxt = request.args.get("next", "")
@@ -369,7 +466,7 @@ def users():
             pw = request.form.get("password", "")
             if len(username) < 3 or len(pw) < 4:
                 flash("Username must be at least 3 characters and password at least 4.", "error")
-            elif q("SELECT 1 FROM users WHERE username = ?", (username,), one=True):
+            elif q("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,), one=True):
                 flash("That username is taken.", "error")
             else:
                 db().execute("INSERT INTO users (username, display_name, password_hash, is_admin, created_at) "
@@ -395,7 +492,7 @@ def users():
                     db().commit()
                     flash("Password reset.", "ok")
         return redirect(url_for("users"))
-    rows = q("SELECT * FROM users ORDER BY is_admin DESC, display_name COLLATE NOCASE")
+    rows = q("SELECT * FROM users ORDER BY is_admin DESC, LOWER(display_name)")
     return render_template("users.html", users=rows)
 
 
@@ -446,14 +543,14 @@ def tournament_new():
             for e in errors:
                 flash(e, "error")
             return render_template("tournament_form.html", t=data, editing=False)
-        cur = db().execute(
+        new_id = db().insert(
             "INSERT INTO tournaments (name, game, event_date, location, swiss_format, swiss_rounds, topcut_size, "
             "max_players, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (data["name"], data["game"], data["event_date"], data["location"], data["swiss_format"],
              data["swiss_rounds"], data["topcut_size"], data["max_players"], current_user()["id"], now()))
         db().commit()
         flash("Tournament created. Players can now join.", "ok")
-        return redirect(url_for("tournament", tid=cur.lastrowid, tab="players"))
+        return redirect(url_for("tournament", tid=new_id, tab="players"))
     blank = {"name": "", "game": "", "event_date": datetime.now().strftime("%Y-%m-%d"), "location": "",
              "swiss_format": "bo1", "swiss_rounds": 0, "topcut_size": 0, "max_players": 0}
     return render_template("tournament_form.html", t=blank, editing=False)
@@ -538,7 +635,7 @@ def tournament(tid):
                      one=True)
 
     all_users = q("SELECT id, display_name, username FROM users WHERE id NOT IN "
-                  "(SELECT user_id FROM entries WHERE tournament_id = ?) ORDER BY display_name COLLATE NOCASE",
+                  "(SELECT user_id FROM entries WHERE tournament_id = ?) ORDER BY LOWER(display_name)",
                   (tid,)) if me["is_admin"] else []
 
     return render_template(
@@ -570,7 +667,7 @@ def join(tid):
     if err:
         flash(err, "error")
     else:
-        db().execute("INSERT OR IGNORE INTO entries (tournament_id, user_id) VALUES (?, ?)",
+        db().execute("INSERT INTO entries (tournament_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
                      (tid, current_user()["id"]))
         db().commit()
         flash("You're registered. Good luck!", "ok")
@@ -624,7 +721,7 @@ def player_add(tid):
         return redirect(url_for("tournament", tid=tid, tab="players"))
     ids = request.form.getlist("user_id")
     for uid in ids:
-        db().execute("INSERT OR IGNORE INTO entries (tournament_id, user_id) VALUES (?, ?)", (tid, int(uid)))
+        db().execute("INSERT INTO entries (tournament_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING", (tid, int(uid)))
     db().commit()
     flash(f"{len(ids)} player(s) added.", "ok")
     return redirect(url_for("tournament", tid=tid, tab="players"))
@@ -830,6 +927,9 @@ def _bad(e):
 
 
 init_db()
+if os.environ.get("RENDER") and not USE_PG:
+    print("WARNING: DATABASE_URL is not set - using a temporary SQLite file. "
+          "All data will be LOST when Render restarts the app. Set DATABASE_URL to a Postgres database.", flush=True)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
