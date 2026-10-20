@@ -13,11 +13,12 @@ import os
 import random
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    session, url_for)
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import engine
@@ -48,8 +49,11 @@ def _secret_key():
 
 
 app.config["SECRET_KEY"] = _secret_key()
+# Players register with just an IGN; their browser remembers them for 90 days.
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=90)
 if os.environ.get("RENDER"):  # served over HTTPS on Render
     app.config["SESSION_COOKIE_SECURE"] = True
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -58,6 +62,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0,
+    is_guest INTEGER NOT NULL DEFAULT 0,          -- 1 = player registered by IGN only (no login)
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tournaments (
@@ -74,7 +79,8 @@ CREATE TABLE IF NOT EXISTS tournaments (
     current_round INTEGER NOT NULL DEFAULT 0,
     champion_id INTEGER,
     created_by INTEGER,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    join_code TEXT UNIQUE
 );
 CREATE TABLE IF NOT EXISTS entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +115,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0,
+    is_guest INTEGER NOT NULL DEFAULT 0,          -- 1 = player registered by IGN only (no login)
     created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci ON users (LOWER(username));
@@ -126,7 +133,8 @@ CREATE TABLE IF NOT EXISTS tournaments (
     current_round INTEGER NOT NULL DEFAULT 0,
     champion_id INTEGER,
     created_by INTEGER,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    join_code TEXT UNIQUE
 );
 CREATE TABLE IF NOT EXISTS entries (
     id SERIAL PRIMARY KEY,
@@ -201,14 +209,34 @@ def _close_db(exc):
         conn.close()
 
 
+JOIN_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # no look-alike characters
+
+
+def new_join_code():
+    return "".join(secrets.choice(JOIN_ALPHABET) for _ in range(7))
+
+
 def init_db():
     if USE_PG:
         import psycopg
         with psycopg.connect(DATABASE_URL) as conn:
             conn.execute(SCHEMA_PG)
+            conn.execute("ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS join_code TEXT")
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest INTEGER NOT NULL DEFAULT 0")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS tournaments_join_code ON tournaments (join_code)")
+            for (tid,) in conn.execute("SELECT id FROM tournaments WHERE join_code IS NULL").fetchall():
+                conn.execute("UPDATE tournaments SET join_code = %s WHERE id = %s", (new_join_code(), tid))
         return
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tournaments)")]
+    if "join_code" not in cols:  # database from an older version
+        conn.execute("ALTER TABLE tournaments ADD COLUMN join_code TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS tournaments_join_code ON tournaments (join_code)")
+    for (tid,) in conn.execute("SELECT id FROM tournaments WHERE join_code IS NULL").fetchall():
+        conn.execute("UPDATE tournaments SET join_code = ? WHERE id = ?", (new_join_code(), tid))
+    if "is_guest" not in [r[1] for r in conn.execute("PRAGMA table_info(users)")]:
+        conn.execute("ALTER TABLE users ADD COLUMN is_guest INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -226,12 +254,99 @@ def now():
 # ---------------------------------------------------------------- auth / csrf
 
 def current_user():
+    """The logged-in Coordinator/Admin account (players don't log in)."""
     uid = session.get("uid")
     if uid is None:
         return None
     if "user" not in g:
-        g.user = q("SELECT * FROM users WHERE id = ?", (uid,), one=True)
+        g.user = q("SELECT * FROM users WHERE id = ? AND is_guest = 0", (uid,), one=True)
     return g.user
+
+
+class _Anonymous:
+    """Stand-in for 'nobody' in templates, so me.id / me.is_admin are safe to use."""
+    id = -1
+    is_admin = 0
+    display_name = ""
+    username = ""
+
+    def __bool__(self):
+        return False
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
+ANON = _Anonymous()
+
+
+def guest_map():
+    """{tournament_id (str): player user id} for players registered from this browser."""
+    return dict(session.get("players") or {})
+
+
+def remember_player(tid, uid):
+    players = guest_map()
+    players[str(tid)] = uid
+    session["players"] = players
+    session.permanent = True
+
+
+def forget_player(tid):
+    players = guest_map()
+    players.pop(str(tid), None)
+    session["players"] = players
+
+
+def actor(tid):
+    """Who is acting on this tournament: the Admin account, or the player registered from this browser."""
+    u = current_user()
+    if u:
+        return u
+    uid = guest_map().get(str(tid))
+    if uid is None:
+        return None
+    return q("SELECT u.* FROM users u JOIN entries e ON e.user_id = u.id "
+             "WHERE u.id = ? AND u.is_guest = 1 AND e.tournament_id = ?", (uid, tid), one=True)
+
+
+IGN_MAX = 30
+
+
+def clean_ign(raw):
+    return " ".join((raw or "").split())[:IGN_MAX]
+
+
+def add_player_by_ign(t, ign):
+    """Register a player in tournament t by IGN. Returns (user_id, error)."""
+    ign = clean_ign(ign)
+    if len(ign) < 2:
+        return None, "Please enter your IGN (at least 2 characters)."
+    if q("SELECT 1 FROM entries e JOIN users u ON u.id = e.user_id "
+         "WHERE e.tournament_id = ? AND LOWER(u.display_name) = LOWER(?)", (t["id"], ign), one=True):
+        return None, f'The IGN "{ign}" is already registered in this tournament. Please use a different IGN.'
+    err = _can_register(t)
+    if err:
+        return None, err
+    uid = db().insert("INSERT INTO users (username, display_name, password_hash, is_admin, is_guest, created_at) "
+                      "VALUES (?, ?, '!', 0, 1, ?)", (f"player-{secrets.token_hex(8)}", ign, now()))
+    db().execute("INSERT INTO entries (tournament_id, user_id) VALUES (?, ?)", (t["id"], uid))
+    db().commit()
+    return uid, None
+
+
+def delete_guest_entries(tid, uid=None):
+    """Remove entries (and the IGN-only player records behind them) from a tournament."""
+    sql = "SELECT e.user_id, u.is_guest FROM entries e JOIN users u ON u.id = e.user_id WHERE e.tournament_id = ?"
+    args = [tid]
+    if uid is not None:
+        sql += " AND e.user_id = ?"
+        args.append(uid)
+    rows = q(sql, tuple(args))
+    for r in rows:
+        db().execute("DELETE FROM entries WHERE tournament_id = ? AND user_id = ?", (tid, r["user_id"]))
+        if r["is_guest"]:
+            db().execute("DELETE FROM users WHERE id = ?", (r["user_id"],))
 
 
 def login_required(f):
@@ -267,7 +382,7 @@ def _csrf_protect():
 def _inject():
     if "csrf" not in session:
         session["csrf"] = secrets.token_hex(16)
-    return {"me": current_user(), "csrf": session["csrf"], "engine": engine}
+    return {"me": current_user(), "account": current_user(), "csrf": session["csrf"], "engine": engine}
 
 
 @app.template_filter("pct")
@@ -388,22 +503,42 @@ app.jinja_env.globals.update(result_choices=result_choices, result_label=result_
 
 # ---------------------------------------------------------------- auth routes
 
+def create_account(form):
+    """Create a user from a sign-up form. Returns (user_id, is_first_user, error)."""
+    username = form.get("username", "").strip()
+    name = form.get("display_name", "").strip() or username
+    pw = form.get("password", "")
+    if len(username) < 3 or len(pw) < 4:
+        return None, False, "Username must be at least 3 characters and password at least 4."
+    if q("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,), one=True):
+        return None, False, "That username is taken."
+    first = q("SELECT COUNT(*) c FROM users WHERE is_guest = 0", one=True)["c"] == 0
+    new_id = db().insert("INSERT INTO users (username, display_name, password_hash, is_admin, created_at) "
+                         "VALUES (?, ?, ?, ?, ?)",
+                         (username, name, generate_password_hash(pw), 1 if first else 0, now()))
+    db().commit()
+    return new_id, first, None
+
+
+def check_login(form):
+    u = q("SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND is_guest = 0",
+          (form.get("username", "").strip(),), one=True)
+    if u and check_password_hash(u["password_hash"], form.get("password", "")):
+        return u
+    return None
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    """First-time setup: create the Admin account. Later Coordinators are added on the Users page."""
+    if q("SELECT COUNT(*) c FROM users WHERE is_guest = 0", one=True)["c"] > 0:
+        flash("The Admin account already exists. Ask your Admin to create a Coordinator account for you.", "error")
+        return redirect(url_for("login"))
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        name = request.form.get("display_name", "").strip() or username
-        pw = request.form.get("password", "")
-        if len(username) < 3 or len(pw) < 4:
-            flash("Username must be at least 3 characters and password at least 4.", "error")
-        elif q("SELECT 1 FROM users WHERE LOWER(username) = LOWER(?)", (username,), one=True):
-            flash("That username is taken.", "error")
+        new_id, first, err = create_account(request.form)
+        if err:
+            flash(err, "error")
         else:
-            first = q("SELECT COUNT(*) c FROM users", one=True)["c"] == 0
-            new_id = db().insert("INSERT INTO users (username, display_name, password_hash, is_admin, created_at) "
-                                 "VALUES (?, ?, ?, ?, ?)",
-                                 (username, name, generate_password_hash(pw), 1 if first else 0, now()))
-            db().commit()
             session["uid"] = new_id
             flash("Account created. You are the Admin (first account)." if first else "Welcome!", "ok")
             return redirect(url_for("index"))
@@ -413,20 +548,20 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = q("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (request.form.get("username", "").strip(),), one=True)
-        if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
+        u = check_login(request.form)
+        if u:
             session["uid"] = u["id"]
             nxt = request.args.get("next", "")
             return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
         flash("Wrong username or password.", "error")
-    no_users = q("SELECT COUNT(*) c FROM users", one=True)["c"] == 0
+    no_users = q("SELECT COUNT(*) c FROM users WHERE is_guest = 0", one=True)["c"] == 0
     return render_template("login.html", no_users=no_users)
 
 
 @app.route("/logout", methods=["POST"])
 def logout():
     session.pop("uid", None)
-    return redirect(url_for("login"))
+    return redirect(url_for("index"))
 
 
 @app.route("/account", methods=["GET", "POST"])
@@ -492,21 +627,24 @@ def users():
                     db().commit()
                     flash("Password reset.", "ok")
         return redirect(url_for("users"))
-    rows = q("SELECT * FROM users ORDER BY is_admin DESC, LOWER(display_name)")
+    rows = q("SELECT * FROM users WHERE is_guest = 0 ORDER BY is_admin DESC, LOWER(display_name)")
     return render_template("users.html", users=rows)
 
 
 # ---------------------------------------------------------------- tournaments
 
 @app.route("/")
-@login_required
 def index():
-    ts = q("""SELECT t.*, (SELECT COUNT(*) FROM entries e WHERE e.tournament_id = t.id) AS players,
-                     (SELECT 1 FROM entries e WHERE e.tournament_id = t.id AND e.user_id = ?) AS joined,
-                     u.display_name AS champion_name
-              FROM tournaments t LEFT JOIN users u ON u.id = t.champion_id
-              ORDER BY CASE t.status WHEN 'finished' THEN 1 ELSE 0 END, t.event_date DESC, t.id DESC""",
-           (current_user()["id"],))
+    rows = q("""SELECT t.*, (SELECT COUNT(*) FROM entries e WHERE e.tournament_id = t.id) AS players,
+                       u.display_name AS champion_name
+                FROM tournaments t LEFT JOIN users u ON u.id = t.champion_id
+                ORDER BY CASE t.status WHEN 'finished' THEN 1 ELSE 0 END, t.event_date DESC, t.id DESC""")
+    mine = guest_map()
+    ts = []
+    for r in rows:
+        d = dict(r)
+        d["joined"] = str(d["id"]) in mine
+        ts.append(d)
     return render_template("index.html", tournaments=ts)
 
 
@@ -545,11 +683,12 @@ def tournament_new():
             return render_template("tournament_form.html", t=data, editing=False)
         new_id = db().insert(
             "INSERT INTO tournaments (name, game, event_date, location, swiss_format, swiss_rounds, topcut_size, "
-            "max_players, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "max_players, created_by, created_at, join_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (data["name"], data["game"], data["event_date"], data["location"], data["swiss_format"],
-             data["swiss_rounds"], data["topcut_size"], data["max_players"], current_user()["id"], now()))
+             data["swiss_rounds"], data["topcut_size"], data["max_players"], current_user()["id"], now(),
+             new_join_code()))
         db().commit()
-        flash("Tournament created. Players can now join.", "ok")
+        flash("Tournament created! Share the registration link below with your players.", "ok")
         return redirect(url_for("tournament", tid=new_id, tab="players"))
     blank = {"name": "", "game": "", "event_date": datetime.now().strftime("%Y-%m-%d"), "location": "",
              "swiss_format": "bo1", "swiss_rounds": 0, "topcut_size": 0, "max_players": 0}
@@ -584,7 +723,7 @@ def tournament_edit(tid):
 def tournament_delete(tid):
     get_tournament(tid)
     db().execute("DELETE FROM matches WHERE tournament_id = ?", (tid,))
-    db().execute("DELETE FROM entries WHERE tournament_id = ?", (tid,))
+    delete_guest_entries(tid)
     db().execute("DELETE FROM tournaments WHERE id = ?", (tid,))
     db().commit()
     flash("Tournament deleted.", "ok")
@@ -592,10 +731,9 @@ def tournament_delete(tid):
 
 
 @app.route("/t/<int:tid>")
-@login_required
 def tournament(tid):
     t = get_tournament(tid)
-    me = current_user()
+    me = actor(tid) or ANON
     ents = entries_for(tid)
     names = {e["user_id"]: e["display_name"] for e in ents}
     my_entry = next((e for e in ents if e["user_id"] == me["id"]), None)
@@ -634,16 +772,12 @@ def tournament(tid):
                      "AND (p1_id = ? OR p2_id = ?)", (tid, t["status"], t["current_round"], me["id"], me["id"]),
                      one=True)
 
-    all_users = q("SELECT id, display_name, username FROM users WHERE id NOT IN "
-                  "(SELECT user_id FROM entries WHERE tournament_id = ?) ORDER BY LOWER(display_name)",
-                  (tid,)) if me["is_admin"] else []
-
     return render_template(
-        "tournament.html", t=t, tab=tab, entries=ents, names=names, my_entry=my_entry,
+        "tournament.html", me=me, t=t, tab=tab, entries=ents, names=names, my_entry=my_entry,
         standings=standings_for(t) if tab == "standings" or t["status"] == "finished" else [],
         pairings=pairings, view_round=view_round, swiss_rounds_played=swiss_rounds_played,
         bracket=bracket, seeds=seeds, my_match=my_match, outstanding=outstanding_count(t),
-        all_users=all_users, active_count=sum(1 for e in ents if not e["dropped"]),
+        active_count=sum(1 for e in ents if not e["dropped"]),
         recommended_rounds=engine.recommended_swiss_rounds(len(ents)))
 
 
@@ -659,38 +793,34 @@ def _can_register(t):
     return None
 
 
-@app.route("/t/<int:tid>/join", methods=["POST"])
-@login_required
-def join(tid):
-    t = get_tournament(tid)
-    err = _can_register(t)
-    if err:
-        flash(err, "error")
-    else:
-        db().execute("INSERT INTO entries (tournament_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-                     (tid, current_user()["id"]))
-        db().commit()
-        flash("You're registered. Good luck!", "ok")
+def _not_your_device(tid):
+    flash("We don't recognise you on this device. Use the phone you registered with, "
+          "or ask the Tournament Coordinator.", "error")
     return redirect(url_for("tournament", tid=tid))
 
 
 @app.route("/t/<int:tid>/leave", methods=["POST"])
-@login_required
 def leave(tid):
+    """A player cancels their registration (before the tournament starts)."""
     t = get_tournament(tid)
+    me = actor(tid)
+    if not me or me["is_admin"]:
+        return _not_your_device(tid)
     if t["status"] == "registration":
-        db().execute("DELETE FROM entries WHERE tournament_id = ? AND user_id = ?", (tid, current_user()["id"]))
+        delete_guest_entries(tid, me["id"])
         db().commit()
-        flash("You left the tournament.", "ok")
+        forget_player(tid)
+        flash("Your registration was cancelled.", "ok")
     return redirect(url_for("tournament", tid=tid))
 
 
 @app.route("/t/<int:tid>/drop", methods=["POST"])
-@login_required
 def drop(tid):
     """Player drops themselves (or Admin drops/undrops a player)."""
     t = get_tournament(tid)
-    me = current_user()
+    me = actor(tid)
+    if not me:
+        return _not_your_device(tid)
     uid = int(request.form.get("user_id", me["id"]))
     if uid != me["id"] and not me["is_admin"]:
         abort(403)
@@ -719,11 +849,17 @@ def player_add(tid):
     if t["status"] != "registration":
         flash("Registration is closed.", "error")
         return redirect(url_for("tournament", tid=tid, tab="players"))
-    ids = request.form.getlist("user_id")
-    for uid in ids:
-        db().execute("INSERT INTO entries (tournament_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING", (tid, int(uid)))
-    db().commit()
-    flash(f"{len(ids)} player(s) added.", "ok")
+    added = 0
+    for line in request.form.get("igns", "").splitlines():
+        if not clean_ign(line):
+            continue
+        uid, err = add_player_by_ign(t, line)
+        if err:
+            flash(err, "error")
+        else:
+            added += 1
+    if added:
+        flash(f"{added} player(s) added.", "ok")
     return redirect(url_for("tournament", tid=tid, tab="players"))
 
 
@@ -734,10 +870,50 @@ def player_remove(tid, uid):
     if t["status"] != "registration":
         flash("Use Drop once the tournament has started.", "error")
     else:
-        db().execute("DELETE FROM entries WHERE tournament_id = ? AND user_id = ?", (tid, uid))
+        delete_guest_entries(tid, uid)
         db().commit()
         flash("Player removed.", "ok")
     return redirect(url_for("tournament", tid=tid, tab="players"))
+
+
+# ---------------------------------------------------------------- public registration page
+
+def _reg_context(t, ign=""):
+    ents = entries_for(t["id"])
+    me = actor(t["id"])
+    return {
+        "t": t, "entries": ents, "ign": ign,
+        "player": me if (me and not me["is_admin"]) else None,
+        "closed_reason": _can_register(t),
+    }
+
+
+@app.route("/r/<code>", methods=["GET", "POST"])
+def registration_page(code):
+    """Shareable page for one tournament: players type their IGN to register. No account needed."""
+    t = q("SELECT * FROM tournaments WHERE join_code = ?", (code.lower(),), one=True)
+    if not t:
+        abort(404)
+    tid = t["id"]
+
+    if request.method == "POST":
+        me = actor(tid)
+        if me and not me["is_admin"]:
+            flash(f"This device is already registered as {me['display_name']}.", "ok")
+            return redirect(url_for("tournament", tid=tid))
+        ign = request.form.get("ign", "")
+        uid, err = add_player_by_ign(t, ign)
+        if err:
+            flash(err, "error")
+            return render_template("registration_page.html", **_reg_context(t, clean_ign(ign)))
+        if not current_user():
+            remember_player(tid, uid)
+        flash(f"You're registered as {clean_ign(ign)}. Good luck!" if not current_user()
+              else f"{clean_ign(ign)} registered.", "ok")
+        return redirect(url_for("tournament", tid=tid) if not current_user()
+                        else url_for("registration_page", code=code))
+
+    return render_template("registration_page.html", **_reg_context(t))
 
 
 # ---------------------------------------------------------------- running the event
@@ -852,14 +1028,16 @@ def _back(tid):
 
 
 @app.route("/t/<int:tid>/match/<int:mid>/report", methods=["POST"])
-@login_required
 def report(tid, mid):
     t = get_tournament(tid)
     m = _load_match(tid, mid)
-    me = current_user()
+    me = actor(tid)
+    if not me:
+        return _not_your_device(tid)
     is_player = me["id"] in (m["p1_id"], m["p2_id"])
     if not (is_player or me["is_admin"]):
-        abort(403)
+        flash("You can only report your own match.", "error")
+        return _back(tid)
     if m["p2_id"] is None:
         abort(400)
     is_current = (t["status"] == m["stage"] and t["current_round"] == m["round"])
@@ -886,15 +1064,17 @@ def report(tid, mid):
 
 
 @app.route("/t/<int:tid>/match/<int:mid>/confirm", methods=["POST"])
-@login_required
 def confirm(tid, mid):
     get_tournament(tid)
     m = _load_match(tid, mid)
-    me = current_user()
+    me = actor(tid)
+    if not me:
+        return _not_your_device(tid)
     if m["status"] != "reported":
         return _back(tid)
     if me["id"] not in (m["p1_id"], m["p2_id"]) and not me["is_admin"]:
-        abort(403)
+        flash("You can only confirm your own match.", "error")
+        return _back(tid)
     if me["id"] == m["reported_by"] and not me["is_admin"]:
         flash("Your opponent needs to confirm the result you reported.", "error")
         return _back(tid)

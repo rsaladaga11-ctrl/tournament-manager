@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Register · {{ t.name }}{% endblock %}
+{% block content %}
+<div class="reg-wrap">
+  <section class="card reg-hero">
+    <div class="reg-kicker">Tournament registration</div>
+    <h1>{{ t.name }}</h1>
+    <div class="reg-meta">
+      {% if t.game %}<span>🎴 {{ t.game }}</span>{% endif %}
+      {% if t.event_date %}<span>📅 {{ t.event_date }}</span>{% endif %}
+      {% if t.location %}<span>📍 {{ t.location }}</span>{% endif %}
+    </div>
+    <div class="reg-format">
+      <div><div class="rf-label">Swiss</div><div class="rf-value">Best of {{ 3 if t.swiss_format == 'bo3' else 1 }}</div>
+        <div class="rf-sub">{% if t.swiss_rounds %}{{ t.swiss_rounds }} rounds{% else %}Rounds set by player count{% endif %}</div></div>
+      <div><div class="rf-label">Top Cut</div><div class="rf-value">{% if t.topcut_size %}Top {{ t.topcut_size }}{% else %}None{% endif %}</div>
+        <div class="rf-sub">{% if t.topcut_size %}Best of 3, single elim.{% else %}Swiss standings decide{% endif %}</div></div>
+      <div><div class="rf-label">Players</div><div class="rf-value">{{ entries|length }}{% if t.max_players %} / {{ t.max_players }}{% endif %}</div>
+        <div class="rf-sub">{% if t.max_players %}{{ [t.max_players - entries|length, 0]|max }} spots left{% else %}No player limit{% endif %}</div></div>
+    </div>
+  </section>
+
+  <section class="card reg-action">
+    {% if player %}
+      <div class="reg-done">
+        <div class="reg-check">✓</div>
+        <h2>You're registered as {{ player.display_name }}</h2>
+        <p class="muted">This phone will remember you. Use it to see your pairings and report results.</p>
+        <a class="btn btn-primary" href="{{ url_for('tournament', tid=t.id) }}">Go to tournament page</a>
+      </div>
+    {% elif closed_reason %}
+      <div class="reg-done">
+        <h2>{{ closed_reason }}</h2>
+        <a class="btn" href="{{ url_for('tournament', tid=t.id) }}">View the tournament</a>
+      </div>
+    {% else %}
+      <h2>{{ 'Register a player' if account else 'Register' }}</h2>
+      <form method="post" autocomplete="off">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Your IGN (in-game name)
+          <input name="ign" value="{{ ign }}" maxlength="30" minlength="2" required autofocus placeholder="e.g. AshKetchum99">
+          <span class="hint">This is the name your opponents and the Coordinator will see. No account or password needed.</span>
+        </label>
+        <button class="btn btn-primary btn-block btn-lg">Register</button>
+      </form>
+      {% if account %}<p class="muted small center reg-switch">You're logged in as a Coordinator, so this registers a player without linking them to this device.</p>{% endif %}
+    {% endif %}
+  </section>
+
+  {% if entries %}
+  <section class="card">
+    <h2>Registered players <span class="count">{{ entries|length }}</span></h2>
+    <div class="reg-players">{% for e in entries %}<span class="chip">{{ e.display_name }}</span>{% endfor %}</div>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

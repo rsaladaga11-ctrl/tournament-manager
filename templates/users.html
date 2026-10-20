@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Users · Tournament Manager{% endblock %}
+{% block title %}Coordinators · Tournament Manager{% endblock %}
 {% block content %}
-<div class="page-head"><h1>Users</h1></div>
+<div class="page-head"><h1>Coordinators &amp; Admins</h1></div>
 <div class="grid-2">
   <section class="card">
-    <h2>Create account</h2>
-    <p class="muted">For walk-in players who don't have an account yet.</p>
+    <h2>Add a Coordinator</h2>
+    <p class="muted">Coordinators log in to run tournaments. Players don't need accounts: they register with their IGN.</p>
     <form method="post">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="action" value="create">
@@ -24,11 +24,11 @@
       {% for u in users %}
         <tr>
           <td><strong>{{ u.display_name }}</strong><div class="muted small">@{{ u.username }}</div></td>
-          <td>{% if u.is_admin %}<span class="tag tag-admin">Admin</span>{% else %}<span class="tag">Player</span>{% endif %}</td>
+          <td>{% if u.is_admin %}<span class="tag tag-admin">Admin</span>{% else %}<span class="tag">Coordinator</span>{% endif %}</td>
           <td class="actions">
             <form method="post" class="inline">
               <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="user_id" value="{{ u.id }}">
-              <button class="btn btn-sm" name="action" value="toggle_admin">{{ 'Make player' if u.is_admin else 'Make admin' }}</button>
+              <button class="btn btn-sm" name="action" value="toggle_admin">{{ 'Remove admin' if u.is_admin else 'Make admin' }}</button>
             </form>
             <details class="inline-details">
               <summary class="btn btn-sm">Reset password</summary>

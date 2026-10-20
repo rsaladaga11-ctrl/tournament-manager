@@ -1,6 +1,6 @@
 # Tournament Manager
 
-A web app where a Tournament Coordinator / Admin creates tournaments and players log in, join, see pairings and report their own results.
+A web app where a Tournament Coordinator / Admin creates tournaments. Each tournament gets its own **registration page link**: players open it, type their **IGN** and they're in. No account needed.
 
 ## Put it online (Render + Neon, both free)
 
@@ -16,7 +16,7 @@ Render hosts the app. Neon holds the database: Render's own free database is del
 2. Click **New** → **Blueprint**, and pick the `tournament-manager` repository (give Render access to it if asked).
 3. When it asks for `DATABASE_URL`, paste the Neon connection string. Click **Deploy Blueprint**.
 4. After a few minutes your app is live at an address like `https://tournament-manager-xxxx.onrender.com`.
-5. Open it and **create your account first: the first account becomes the Admin.**
+5. Open it and **create the Admin account first** (the setup page only works once).
 
 Every push to GitHub redeploys the app automatically. Your data stays in Neon.
 
@@ -27,7 +27,7 @@ Good to know about the free plan: the app goes to sleep after 15 minutes with no
 1. Install Python 3.10+ from python.org (tick "Add Python to PATH").
 2. Double-click `run.bat`. The first run installs Flask automatically.
 3. Open http://localhost:5000
-4. **The first account you create becomes the Admin.** Everyone after that is a Player.
+4. The first time, you'll create the **Admin account**. Extra Coordinators are added on the *Coordinators* page.
 
 Players on the same network open `http://<this-PC's-IP>:5000` on their phone or PC.
 (If they can't reach it, allow Python through Windows Firewall when prompted.)
@@ -43,14 +43,18 @@ Players on the same network open `http://<this-PC's-IP>:5000` on their phone or 
 
 ## How an event runs
 
-1. **Registration**: players click *Join*, or the Admin adds them on the Players tab (walk-ins can get accounts on the *Users* page).
-2. **Start tournament**: Round 1 is paired at random.
-3. Each round, a player reports the result and the opponent taps **Confirm** (or **Dispute**). The Admin can enter or override any result.
-4. When every match has a result, the Admin clicks **Pair next round**. Players are paired with others on the same points, with no rematches. With an odd number of players, the lowest-ranked player who hasn't had a bye gets one (counts as a win).
-5. After the last Swiss round: **End Swiss · build Top X** seeds the bracket from standings (1v8, 4v5, 2v7, 3v6), or **Finish** if there's no cut.
-6. Bracket rounds advance until the Finals, then the champion is crowned.
+1. **Create the tournament.** The app makes a registration page for it and shows its link (with a **Copy link** button and a QR code) on the tournament page.
+2. **Share the link.** Players open it, type their IGN and tap *Register*. If that IGN is already registered in the tournament, they're told to pick another. Their phone remembers them, so they don't need an account or password.
+   Walk-ins without a phone: add them by IGN on the Players tab.
+3. **Start tournament**: Round 1 is paired at random.
+4. Each round, a player reports the result on their phone and the opponent taps **Confirm** (or **Dispute**). The Coordinator can enter or override any result, e.g. for walk-ins or a player who switched phones.
+5. When every match has a result, click **Pair next round**. Players are paired with others on the same points, with no rematches. With an odd number of players, the lowest-ranked player who hasn't had a bye gets one (counts as a win).
+6. After the last Swiss round: **End Swiss · build Top X** seeds the bracket from standings (1v8, 4v5, 2v7, 3v6), or **Finish** if there's no cut.
+7. Bracket rounds advance until the Finals, then the champion is crowned.
 
-Other tools: players can **Drop**, and the Admin can drop or reinstate players. **Re-pair round** redoes the current pairings if no results are in yet. Tournament **Settings** can be edited until the event starts.
+Other tools: players can **Drop**, and the Coordinator can drop or reinstate players. **Re-pair round** redoes the current pairings if no results are in yet. Tournament **Settings** can be edited until the event starts.
+
+Anyone can view tournaments, pairings and standings without logging in. Only Coordinators log in (*Coordinator login* at the top).
 
 ## Standings
 

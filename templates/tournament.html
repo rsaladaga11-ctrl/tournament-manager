@@ -13,7 +13,7 @@
     </div>
     <div class="chips">
       <span class="chip">Swiss {{ t.swiss_format|upper }}</span>
-      <span class="chip">{% if t.swiss_rounds %}{{ t.swiss_rounds }} rounds{% else %}Auto rounds ({{ recommended_rounds }} for {{ entries|length }} players){% endif %}</span>
+      <span class="chip">{% if t.swiss_rounds %}{{ t.swiss_rounds }} rounds{% elif entries|length >= 2 %}Auto rounds ({{ recommended_rounds }} for {{ entries|length }} players){% else %}Auto rounds{% endif %}</span>
       {% if t.topcut_size %}<span class="chip chip-cut">Top {{ t.topcut_size }} · BO3</span>{% else %}<span class="chip">No Top Cut</span>{% endif %}
       <span class="chip">{{ entries|length }}{% if t.max_players %}/{{ t.max_players }}{% endif %} players</span>
     </div>
@@ -53,6 +53,41 @@
   {% endif %}
 </section>
 
+{% if me.is_admin and t.status == 'registration' and t.join_code %}
+{% set reg_url = url_for('registration_page', code=t.join_code, _external=True) %}
+<section class="card share">
+  <div class="share-text">
+    <div class="share-kicker">Registration page</div>
+    <h2>Share this link so players can register</h2>
+    <div class="share-row">
+      <input id="reg-link" value="{{ reg_url }}" readonly onclick="this.select()">
+      <button type="button" class="btn btn-primary" id="copy-btn">Copy link</button>
+      <a class="btn" href="{{ reg_url }}" target="_blank" rel="noopener">Open page</a>
+    </div>
+    {% if request.host.startswith('localhost') or request.host.startswith('127.') %}
+    <p class="hint">You're on <strong>localhost</strong>, which only works on this PC. For players on your network, replace <code>{{ request.host.split(':')[0] }}</code> with this PC's IP address (e.g. 192.168.x.x).</p>
+    {% else %}
+    <p class="hint">Players can open it on their phone, create an account and register in one step. Or show them the QR code.</p>
+    {% endif %}
+  </div>
+  <div class="share-qr" id="qr" aria-label="QR code for the registration link"></div>
+</section>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+  (function () {
+    var link = document.getElementById('reg-link').value;
+    try { new QRCode(document.getElementById('qr'), { text: link, width: 148, height: 148, correctLevel: QRCode.CorrectLevel.M }); }
+    catch (e) { document.getElementById('qr').style.display = 'none'; }
+    document.getElementById('copy-btn').addEventListener('click', function () {
+      var b = this, input = document.getElementById('reg-link');
+      function done() { b.textContent = 'Copied ✓'; setTimeout(function () { b.textContent = 'Copy link'; }, 1800); }
+      if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(input.value).then(done); }
+      else { input.select(); document.execCommand('copy'); done(); }
+    });
+  })();
+</script>
+{% endif %}
+
 {% if t.status == 'finished' and t.champion_id %}
 <section class="champion card">
   <div class="trophy">🏆</div>
@@ -61,22 +96,22 @@
 {% endif %}
 
 {# ---------- player panel ---------- #}
-{% if not me.is_admin or my_entry %}
+{% if not me.is_admin %}
 <section class="card my-panel">
   {% if t.status == 'registration' %}
     {% if my_entry %}
-      <div class="my-row"><div><strong>You're registered.</strong> <span class="muted">Pairings appear here when the Coordinator starts Round 1.</span></div>
-      <form method="post" action="{{ url_for('leave', tid=t.id) }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-sm">Leave</button></form></div>
-    {% else %}
-      <div class="my-row"><div><strong>Registration is open.</strong></div>
-      <form method="post" action="{{ url_for('join', tid=t.id) }}" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-primary">Join tournament</button></form></div>
+      <div class="my-row"><div><strong>You're registered as {{ my_entry.display_name }}.</strong> <span class="muted">Your pairing will show here when Round 1 starts. Use this phone to report your results.</span></div>
+      <form method="post" action="{{ url_for('leave', tid=t.id) }}" class="inline" onsubmit="return confirm('Cancel your registration?')"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn btn-sm">Cancel registration</button></form></div>
+    {% elif t.join_code %}
+      <div class="my-row"><div><strong>Registration is open.</strong> <span class="muted">Just enter your IGN, no account needed.</span></div>
+      <a class="btn btn-primary" href="{{ url_for('registration_page', code=t.join_code) }}">Register</a></div>
     {% endif %}
   {% elif my_entry and my_entry.dropped %}
-    <div class="muted">You have dropped from this tournament.</div>
+    <div class="muted">You ({{ my_entry.display_name }}) have dropped from this tournament.</div>
   {% elif my_match %}
     {% set opp = my_match.p2_id if my_match.p1_id == me.id else my_match.p1_id %}
     <div class="my-match">
-      <div class="my-match-label">Your {{ 'match' if t.status == 'swiss' else 'bracket match' }} · {% if t.status == 'swiss' %}Round {{ t.current_round }}{% else %}{{ engine.topcut_round_name(t.topcut_size // (2 ** (t.current_round - 1))) }}{% endif %} · Best of {{ 3 if (t.status == 'topcut' or t.swiss_format == 'bo3') else 1 }}</div>
+      <div class="my-match-label">{{ me.display_name }} · {% if t.status == 'swiss' %}Round {{ t.current_round }}{% else %}{{ engine.topcut_round_name(t.topcut_size // (2 ** (t.current_round - 1))) }}{% endif %} · Best of {{ 3 if (t.status == 'topcut' or t.swiss_format == 'bo3') else 1 }}</div>
       {% if opp is none %}
         <div class="vs"><strong>You have a BYE this round</strong> <span class="muted">(counts as a win)</span></div>
       {% else %}
@@ -86,7 +121,7 @@
           <span class="score">{{ format_score(my_match, t) }}</span> {{ status_pill(my_match, names) }}
         </div>
         {% if my_match.status == 'reported' and my_match.reported_by == me.id %}<p class="muted small">Waiting for {{ names[opp] }} to confirm. You can still change it.</p>{% endif %}
-        {% if my_match.status == 'reported' and my_match.reported_by != me.id %}<p class="small"><strong>{{ names.get(my_match.reported_by, 'Your opponent') }}</strong> reported this result. Is it correct?</p>{% endif %}
+        {% if my_match.status == 'reported' and my_match.reported_by != me.id %}<p class="small"><strong>{{ names.get(my_match.reported_by, 'The Coordinator') }}</strong> reported this result. Is it correct?</p>{% endif %}
         {{ result_controls(t, my_match, names, here) }}
       {% endif %}
     </div>
@@ -96,11 +131,11 @@
     </form>
     {% endif %}
   {% elif my_entry and t.status == 'topcut' %}
-    <div class="muted">You didn't make this round of the Top Cut. Thanks for playing!</div>
+    <div class="muted">You didn't make this round of the Top Cut. Thanks for playing, {{ my_entry.display_name }}!</div>
   {% elif my_entry and t.status == 'finished' %}
-    <div class="muted">Tournament complete. Thanks for playing!</div>
-  {% elif not my_entry %}
-    <div class="muted">You're spectating this tournament.</div>
+    <div class="muted">Tournament complete. Thanks for playing, {{ my_entry.display_name }}!</div>
+  {% elif t.status in ('swiss', 'topcut') %}
+    <div class="muted">Find your name in the pairings below. Registered on a different phone? Report your result there, or tell the Coordinator.</div>
   {% endif %}
 </section>
 {% endif %}
@@ -118,28 +153,26 @@
 
 {% if tab == 'players' %}
 <section class="card">
-  {% if me.is_admin and t.status == 'registration' and all_users %}
+  {% if me.is_admin and t.status == 'registration' %}
   <form method="post" action="{{ url_for('player_add', tid=t.id) }}" class="add-players">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>Add players
-      <select name="user_id" multiple size="{{ [all_users|length, 6]|min }}">
-        {% for u in all_users %}<option value="{{ u.id }}">{{ u.display_name }} (@{{ u.username }})</option>{% endfor %}
-      </select>
-      <span class="hint">Hold Ctrl to pick several. New walk-in? Create their account on the <a href="{{ url_for('users') }}">Users</a> page.</span>
+    <label>Add walk-in players by IGN
+      <textarea name="igns" rows="3" placeholder="One IGN per line"></textarea>
+      <span class="hint">For players without a phone. You'll enter their results for them.</span>
     </label>
-    <button class="btn btn-primary">Add selected</button>
+    <button class="btn btn-primary">Add players</button>
   </form>
   {% endif %}
   {% if not entries %}
     <p class="muted empty">No players yet.</p>
   {% else %}
   <table class="table">
-    <thead><tr><th>#</th><th>Player</th><th>Status</th>{% if me.is_admin %}<th></th>{% endif %}</tr></thead>
+    <thead><tr><th>#</th><th>IGN</th><th>Status</th>{% if me.is_admin %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for e in entries %}
       <tr class="{{ 'dropped' if e.dropped }}">
         <td class="muted">{{ loop.index }}</td>
-        <td><strong>{{ e.display_name }}</strong> <span class="muted small">@{{ e.username }}</span>{% if e.seed %} <span class="tag">Seed {{ e.seed }}</span>{% endif %}</td>
+        <td><strong>{{ e.display_name }}</strong>{% if e.user_id == me.id %} <span class="tag tag-ok">You</span>{% endif %}{% if e.seed %} <span class="tag">Seed {{ e.seed }}</span>{% endif %}</td>
         <td>{% if e.dropped %}<span class="tag tag-drop">Dropped R{{ e.dropped_round }}</span>{% else %}<span class="tag tag-ok">Active</span>{% endif %}</td>
         {% if me.is_admin %}
         <td class="actions">

@@ -8,7 +8,7 @@
   <div class="card empty">
     <p>No tournaments yet.</p>
     {% if me.is_admin %}<a class="btn btn-primary" href="{{ url_for('tournament_new') }}">Create the first one</a>
-    {% else %}<p class="muted">Your Tournament Coordinator will create one soon.</p>{% endif %}
+    {% else %}<p class="muted">Your Tournament Coordinator will post one soon.</p>{% endif %}
   </div>
 {% else %}
 <div class="t-list">
@@ -16,7 +16,7 @@
   <a class="card t-card" href="{{ url_for('tournament', tid=t.id) }}">
     <div class="t-card-top">
       <span class="status status-{{ t.status }}">{% if t.status == 'swiss' %}Swiss · Round {{ t.current_round }}{% elif t.status == 'topcut' %}Top Cut{% else %}{{ t.status|capitalize }}{% endif %}</span>
-      {% if t.joined %}<span class="tag tag-ok">Joined</span>{% endif %}
+      {% if t.joined %}<span class="tag tag-ok">Registered</span>{% endif %}
     </div>
     <h3>{{ t.name }}</h3>
     <div class="muted small">{{ t.game or 'Tournament' }}{% if t.event_date %} · {{ t.event_date }}{% endif %}{% if t.location %} · {{ t.location }}{% endif %}</div>
