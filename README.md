@@ -32,6 +32,15 @@ Good to know about the free plan: the app goes to sleep after 15 minutes with no
 Players on the same network open `http://<this-PC's-IP>:5000` on their phone or PC.
 (If they can't reach it, allow Python through Windows Firewall when prompted.)
 
+## Forgot the Coordinator / Admin login?
+
+1. In Render, open your service, then **Environment**, then **Add Environment Variable**: key `ADMIN_RESET_PASSWORD`, value = your new password. Click **Save** (Render restarts the app).
+2. Open **Logs**: a line `ADMIN PASSWORD RESET. Admin usernames: ...` shows your username(s).
+3. Log in with that username and the new password.
+4. **Delete the `ADMIN_RESET_PASSWORD` variable** again and save.
+
+On your own PC: run `set ADMIN_RESET_PASSWORD=yournewpassword` and then `run.bat` in the same Command Prompt window.
+
 ## Tournament options (set when creating)
 
 | Setting | Choices |

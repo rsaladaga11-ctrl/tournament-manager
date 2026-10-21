@@ -1106,7 +1106,35 @@ def _bad(e):
     return render_template("error.html", code=400, message=getattr(e, "description", "Bad request.")), 400
 
 
+def reset_admin_password_from_env():
+    """Forgot the Coordinator login? Set ADMIN_RESET_PASSWORD (e.g. in Render > Environment).
+    On start-up every Admin account gets that password, and the usernames are printed to the logs.
+    Remove the variable again afterwards."""
+    new_pw = os.environ.get("ADMIN_RESET_PASSWORD", "").strip()
+    if not new_pw:
+        return
+    if len(new_pw) < 4:
+        print("ADMIN_RESET_PASSWORD ignored: it must be at least 4 characters.", flush=True)
+        return
+    conn = Database()
+    try:
+        admins = conn.execute("SELECT username, display_name FROM users "
+                              "WHERE is_admin = 1 AND is_guest = 0 ORDER BY id").fetchall()
+        conn.execute("UPDATE users SET password_hash = ? WHERE is_admin = 1 AND is_guest = 0",
+                     (generate_password_hash(new_pw),))
+        conn.commit()
+    finally:
+        conn.close()
+    names = ", ".join(f"{a['username']} ({a['display_name']})" for a in admins) or "none found"
+    print("=" * 70, flush=True)
+    print(f"ADMIN PASSWORD RESET. Admin usernames: {names}", flush=True)
+    print("Log in with one of these usernames and the password from ADMIN_RESET_PASSWORD,", flush=True)
+    print("then REMOVE the ADMIN_RESET_PASSWORD environment variable.", flush=True)
+    print("=" * 70, flush=True)
+
+
 init_db()
+reset_admin_password_from_env()
 if os.environ.get("RENDER") and not USE_PG:
     print("WARNING: DATABASE_URL is not set - using a temporary SQLite file. "
           "All data will be LOST when Render restarts the app. Set DATABASE_URL to a Postgres database.", flush=True)
